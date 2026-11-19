@@ -32,6 +32,8 @@ fn copyq_bin() -> &'static str {
 /// Không ghi file tạm ra ổ cứng, không gọi shell, chỉ giao tiếp cục bộ qua tiến trình `copyq`.
 pub fn fetch_items(limit: usize) -> Result<Vec<ClipboardItem>, String> {
     let limit = limit.clamp(1, 200);
+    // Lưu ý: CopyQ CLI tự giải mã các chuỗi escape kiểu \n trong đối số dòng lệnh,
+    // nên script JS bên dưới KHÔNG chứa ký tự backslash (\) hay ký tự ngoài ASCII.
     let script = format!(
         r#"
 var maxItems = {limit};
@@ -40,9 +42,22 @@ var count = total < maxItems ? total : maxItems;
 var pinnedMime = 'application/x-copyq-item-pinned';
 var imgMimes = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp'];
 var maxImgBytes = 12582912;
+var nl = String.fromCharCode(10);
+var cr = String.fromCharCode(13);
+
+function byteLen(b) {{
+    if (!b) {{ return 0; }}
+    if (typeof b.size === 'function') {{ return b.size(); }}
+    if (typeof b.length === 'number') {{ return b.length; }}
+    return 0;
+}}
+
+function cleanB64(val) {{
+    return str(toBase64(val)).split(nl).join('').split(cr).join('');
+}}
 
 for (var i = 0; i < count; i++) {{
-    var fmts = formats(i);
+    var fmts = formats(i) || [];
     var isPin = fmts.indexOf(pinnedMime) !== -1 ? 1 : 0;
     var imgMime = '';
     for (var k = 0; k < imgMimes.length; k++) {{
@@ -53,10 +68,11 @@ for (var i = 0; i < count; i++) {{
     }}
     if (imgMime !== '') {{
         var rawImg = read(imgMime, i);
-        if (rawImg && rawImg.length > 0 && rawImg.length <= maxImgBytes) {{
-            print('I ' + i + ' ' + isPin + ' ' + str(toBase64(rawImg)) + '\n');
+        var n = byteLen(rawImg);
+        if (n > 0 && n <= maxImgBytes) {{
+            print('I ' + i + ' ' + isPin + ' ' + cleanB64(rawImg) + nl);
         }} else {{
-            print('T ' + i + ' ' + isPin + ' ' + str(toBase64('[Ảnh quá lớn]')) + '\n');
+            print('L ' + i + ' ' + isPin + ' ' + nl);
         }}
     }} else {{
         var rawTxt = '';
@@ -70,7 +86,7 @@ for (var i = 0; i < count; i++) {{
         if (rawTxt.length > 4096) {{
             rawTxt = rawTxt.substring(0, 4096);
         }}
-        print('T ' + i + ' ' + isPin + ' ' + str(toBase64(rawTxt)) + '\n');
+        print('T ' + i + ' ' + isPin + ' ' + cleanB64(rawTxt) + nl);
     }}
 }}
 "#
@@ -139,6 +155,16 @@ fn parse_protocol_output(stdout: &str) -> Vec<ClipboardItem> {
                     row,
                     pinned,
                     content: ItemContent::Text { display, search },
+                });
+            }
+            "L" => {
+                items.push(ClipboardItem {
+                    row,
+                    pinned,
+                    content: ItemContent::Text {
+                        display: "[Ảnh dung lượng lớn — bấm để dán]".to_string(),
+                        search: "ảnh dung lượng lớn image".to_string(),
+                    },
                 });
             }
             _ => {}

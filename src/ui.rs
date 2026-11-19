@@ -9,11 +9,12 @@ use gtk::{
     gdk, glib, pango, Align, Application, ApplicationWindow, Button, ContentFit, CssProvider,
     EventControllerKey, IconTheme, Image, Label, ListBox, ListBoxRow, MenuButton, Orientation,
     Overflow, Overlay, Picture, PolicyType, Popover, PositionType, PropagationPhase,
-    ScrolledWindow, SearchEntry, SelectionMode,
+    ScrolledWindow, SearchEntry, SelectionMode, WindowHandle,
 };
 
-use crate::config::{AppConfig, ImageFit, Theme};
+use crate::config::{AppConfig, ImageFit, PositionMode, Theme, DEFAULT_CSS};
 use crate::copyq::{self, ClipboardItem, ItemContent};
+use crate::position;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FilterTab {
@@ -151,13 +152,23 @@ pub fn build_ui(app: &Application) {
     footer_bar.append(&hint_left);
     footer_bar.append(&hint_right);
 
+    // Bọc Header / Filter / Footer bằng WindowHandle để có thể nắm kéo di chuyển cửa sổ đi mọi nơi
+    let header_handle = WindowHandle::new();
+    header_handle.set_child(Some(&header_bar));
+
+    let filter_handle = WindowHandle::new();
+    filter_handle.set_child(Some(&filter_bar));
+
+    let footer_handle = WindowHandle::new();
+    footer_handle.set_child(Some(&footer_bar));
+
     let main_box = gtk::Box::new(Orientation::Vertical, 0);
     main_box.set_vexpand(true);
     main_box.set_hexpand(true);
-    main_box.append(&header_bar);
-    main_box.append(&filter_bar);
+    main_box.append(&header_handle);
+    main_box.append(&filter_handle);
     main_box.append(&scrolled);
-    main_box.append(&footer_bar);
+    main_box.append(&footer_handle);
 
     // ===== 5. LỚP PHỦ PHÓNG TO ẢNH (ZOOM OVERLAY) =====
     let (zoom_overlay, zoom_picture, zoom_close_btn, zoom_paste_btn) = build_zoom_overlay();
@@ -260,6 +271,15 @@ pub fn build_ui(app: &Application) {
         });
     }
 
+    // Tự động đặt popup ngay gần con trỏ chuột (tự lật lên trên nếu đang ở khung chat sát đáy)
+    let (pos_mode, win_w, win_h) = {
+        let st = handles.state.borrow();
+        (st.config.position, st.config.width, st.config.height)
+    };
+    if pos_mode == PositionMode::Cursor {
+        position::attach_cursor_positioning(&window, win_w, win_h);
+    }
+
     // Điều khiển bàn phím toàn cửa sổ (Capture phase)
     setup_keyboard_controller(&window, handles.clone());
 
@@ -273,6 +293,9 @@ pub fn build_ui(app: &Application) {
 impl UiHandles {
     fn apply_theme(&self) {
         let theme = self.state.borrow().config.theme;
+        if let Some(settings) = gtk::Settings::default() {
+            settings.set_gtk_application_prefer_dark_theme(theme == Theme::Dark);
+        }
         match theme {
             Theme::Dark => {
                 self.window.remove_css_class("theme-light");
@@ -894,7 +917,7 @@ fn setup_unfocus_autoclose(window: &ApplicationWindow, ui: UiHandles) {
         }
         let win_weak = win.downgrade();
         let pop_count = ui.popover_open_count.clone();
-        glib::timeout_add_local_once(Duration::from_millis(90), move || {
+        glib::timeout_add_local_once(Duration::from_millis(120), move || {
             if let Some(w) = win_weak.upgrade() {
                 if !w.is_active() && pop_count.get() == 0 {
                     w.close();
@@ -905,15 +928,25 @@ fn setup_unfocus_autoclose(window: &ApplicationWindow, ui: UiHandles) {
 }
 
 fn load_stylesheet() {
-    let css = AppConfig::load_or_create_css();
-    let provider = CssProvider::new();
-    provider.load_from_string(&css);
+    let Some(display) = gdk::Display::default() else {
+        return;
+    };
 
-    if let Some(display) = gdk::Display::default() {
+    let base_provider = CssProvider::new();
+    base_provider.load_from_string(DEFAULT_CSS);
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &base_provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+
+    if let Some(custom_css) = AppConfig::load_or_create_custom_css() {
+        let user_provider = CssProvider::new();
+        user_provider.load_from_string(&custom_css);
         gtk::style_context_add_provider_for_display(
             &display,
-            &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            &user_provider,
+            gtk::STYLE_PROVIDER_PRIORITY_USER,
         );
     }
 }

@@ -203,13 +203,29 @@ window.theme-dark .header-bar {
 }
 
 window.theme-dark .search-input {
-    background-color: #16181c;
-    color: #eef1f5;
-    border: 1px solid #353a43;
+    background-color: #14161a;
+    color: #f3f6fa;
+    caret-color: #f3f6fa;
+    border: 1px solid #49505e;
+}
+
+window.theme-dark .search-input text {
+    color: #f3f6fa;
+    caret-color: #f3f6fa;
+}
+
+window.theme-dark .search-input text placeholder,
+window.theme-dark .search-input placeholder {
+    color: #a6b0c0;
+}
+
+window.theme-dark .search-input image {
+    color: #bcc5d4;
 }
 
 window.theme-dark .search-input:focus-within {
-    border-color: #5294e2;
+    border-color: #5ea0ee;
+    background-color: #111317;
 }
 
 window.theme-dark .theme-toggle-btn {
@@ -300,7 +316,7 @@ window.theme-dark .empty-label {
 
 window.theme-dark .footer-bar {
     border-top-color: #333841;
-    color: #8b93a0;
+    color: #a2aab8;
 }
 
 /* ============================================================
@@ -319,7 +335,22 @@ window.theme-light .header-bar {
 window.theme-light .search-input {
     background-color: #ffffff;
     color: #1c2026;
+    caret-color: #1c2026;
     border: 1px solid #cfd6e0;
+}
+
+window.theme-light .search-input text {
+    color: #1c2026;
+    caret-color: #1c2026;
+}
+
+window.theme-light .search-input text placeholder,
+window.theme-light .search-input placeholder {
+    color: #6f7887;
+}
+
+window.theme-light .search-input image {
+    color: #5c6573;
 }
 
 window.theme-light .search-input:focus-within {

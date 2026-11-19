@@ -5,6 +5,15 @@ use std::path::PathBuf;
 
 pub const DEFAULT_CSS: &str = include_str!("../assets/style.css");
 
+const CUSTOM_CSS_TEMPLATE: &str = "\
+/* Tùy biến giao diện riêng cho CopyQ-UI (tự động ghi đè lên theme mặc định).
+ * Sửa file này xong bấm Win+V là thấy thay đổi ngay, không cần build lại.
+ *
+ * Ví dụ đổi độ bo góc cửa sổ:
+ * .popup-container { border-radius: 18px; }
+ */
+";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Theme {
     Dark,
@@ -56,6 +65,28 @@ impl ImageFit {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PositionMode {
+    Cursor,
+    Default,
+}
+
+impl PositionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PositionMode::Cursor => "cursor",
+            PositionMode::Default => "default",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "default" => PositionMode::Default,
+            _ => PositionMode::Cursor,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppConfig {
     pub theme: Theme,
@@ -65,6 +96,7 @@ pub struct AppConfig {
     pub auto_paste: bool,
     pub plain_text_paste: bool,
     pub image_fit: ImageFit,
+    pub position: PositionMode,
     pub close_on_unfocus: bool,
 }
 
@@ -78,6 +110,7 @@ impl Default for AppConfig {
             auto_paste: true,
             plain_text_paste: false,
             image_fit: ImageFit::Contain,
+            position: PositionMode::Cursor,
             close_on_unfocus: true,
         }
     }
@@ -140,6 +173,7 @@ impl AppConfig {
                 "auto_paste" => cfg.auto_paste = parse_bool(val, cfg.auto_paste),
                 "plain_text_paste" => cfg.plain_text_paste = parse_bool(val, cfg.plain_text_paste),
                 "image_fit" => cfg.image_fit = ImageFit::from_str(val),
+                "position" => cfg.position = PositionMode::from_str(val),
                 "close_on_unfocus" => cfg.close_on_unfocus = parse_bool(val, cfg.close_on_unfocus),
                 _ => {}
             }
@@ -157,6 +191,7 @@ impl AppConfig {
              auto_paste = {}\n\
              plain_text_paste = {}\n\
              image_fit = {}\n\
+             position = {}\n\
              close_on_unfocus = {}\n",
             self.theme.as_str(),
             self.max_items,
@@ -165,6 +200,7 @@ impl AppConfig {
             self.auto_paste,
             self.plain_text_paste,
             self.image_fit.as_str(),
+            self.position.as_str(),
             self.close_on_unfocus,
         )
     }
@@ -178,20 +214,20 @@ impl AppConfig {
         write_private_file(&path, self.serialize().as_bytes())
     }
 
-    pub fn load_or_create_css() -> String {
-        let Some(dir) = Self::config_dir() else {
-            return DEFAULT_CSS.to_string();
-        };
-        let css_path = dir.join("style.css");
+    /// Trả về nội dung CSS ghi đè cá nhân tại ~/.config/copyq-ui/custom.css (tự tạo file mẫu nếu chưa có).
+    pub fn load_or_create_custom_css() -> Option<String> {
+        let dir = Self::config_dir()?;
+        let css_path = dir.join("custom.css");
         if let Ok(existing) = fs::read_to_string(&css_path) {
             if !existing.trim().is_empty() {
-                return existing;
+                return Some(existing);
             }
+            return None;
         }
         if ensure_private_dir(&dir).is_ok() {
-            let _ = write_private_file(&css_path, DEFAULT_CSS.as_bytes());
+            let _ = write_private_file(&css_path, CUSTOM_CSS_TEMPLATE.as_bytes());
         }
-        DEFAULT_CSS.to_string()
+        None
     }
 }
 
@@ -239,6 +275,7 @@ mod tests {
             auto_paste = false\n\
             plain_text_paste = true\n\
             image_fit = cover\n\
+            position = default\n\
             close_on_unfocus = false\n\
         ";
         let cfg = AppConfig::parse(input);
@@ -249,6 +286,7 @@ mod tests {
         assert!(!cfg.auto_paste);
         assert!(cfg.plain_text_paste);
         assert_eq!(cfg.image_fit, ImageFit::Cover);
+        assert_eq!(cfg.position, PositionMode::Default);
         assert!(!cfg.close_on_unfocus);
 
         let serialized = cfg.serialize();

@@ -5,10 +5,12 @@ edition = "2021"
 description = "Lightweight, secure GTK4 popup UI for CopyQ on Linux Mint Cinnamon"
 license = "MIT"
 
-# Security-by-design: ONLY one direct dependency (official GTK4 bindings).
-# Zero networking, zero telemetry, zero shell execution, zero temp files.
+# Security-by-design: chỉ dùng thư viện đồ họa cục bộ chính chủ (GTK4 + X11).
+# Không thư viện mạng, không telemetry, không gọi shell, không ghi clipboard ra đĩa.
 [dependencies]
 gtk4 = { version = "0.9", features = ["v4_14"] }
+gdk4-x11 = "0.9"
+x11rb = "0.13"
 
 [profile.release]
 opt-level = "z"

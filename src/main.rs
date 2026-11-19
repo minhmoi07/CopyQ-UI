@@ -2,6 +2,7 @@
 
 mod config;
 mod copyq;
+mod position;
 mod ui;
 
 use gtk4 as gtk;
@@ -26,7 +27,7 @@ fn main() -> glib::ExitCode {
                        copyq-ui --help      Xem hướng dẫn\n\n\
                      Cấu hình cá nhân:\n\
                        ~/.config/copyq-ui/config.conf\n\
-                       ~/.config/copyq-ui/style.css",
+                       ~/.config/copyq-ui/custom.css",
                     env!("CARGO_PKG_VERSION")
                 );
                 return glib::ExitCode::SUCCESS;
