@@ -32,8 +32,8 @@ fn copyq_bin() -> &'static str {
 /// Không ghi file tạm ra ổ cứng, không gọi shell, chỉ giao tiếp cục bộ qua tiến trình `copyq`.
 pub fn fetch_items(limit: usize) -> Result<Vec<ClipboardItem>, String> {
     let limit = limit.clamp(1, 200);
-    // Lưu ý: CopyQ CLI tự giải mã các chuỗi escape kiểu \n trong đối số dòng lệnh,
-    // nên script JS bên dưới KHÔNG chứa ký tự backslash (\) hay ký tự ngoài ASCII.
+    // Chỉ dùng các hàm API có sẵn trong CopyQ 7.1.0 (size, read, str, toBase64, print, plugins.itempinned).
+    // Không chứa ký tự backslash (\) hay ký tự ngoài ASCII để tránh CLI của CopyQ giải mã nhầm.
     let script = format!(
         r#"
 var maxItems = {limit};
@@ -44,6 +44,7 @@ var imgMimes = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp
 var maxImgBytes = 12582912;
 var nl = String.fromCharCode(10);
 var cr = String.fromCharCode(13);
+var hasPinPlugin = (typeof plugins !== 'undefined' && plugins.itempinned);
 
 function byteLen(b) {{
     if (!b) {{ return 0; }}
@@ -56,9 +57,23 @@ function cleanB64(val) {{
     return str(toBase64(val)).split(nl).join('').split(cr).join('');
 }}
 
+function getFormats(row) {{
+    var raw = str(read('?', row));
+    if (!raw) {{ return []; }}
+    var parts = raw.split(nl);
+    var out = [];
+    for (var j = 0; j < parts.length; j++) {{
+        var s = parts[j].split(cr).join('').trim();
+        if (s.length > 0) {{ out.push(s); }}
+    }}
+    return out;
+}}
+
 for (var i = 0; i < count; i++) {{
-    var fmts = formats(i) || [];
-    var isPin = fmts.indexOf(pinnedMime) !== -1 ? 1 : 0;
+    var fmts = getFormats(i);
+    var isPin = hasPinPlugin
+        ? (plugins.itempinned.isPinned(i) ? 1 : 0)
+        : (fmts.indexOf(pinnedMime) !== -1 ? 1 : 0);
     var imgMime = '';
     for (var k = 0; k < imgMimes.length; k++) {{
         if (fmts.indexOf(imgMimes[k]) !== -1) {{
@@ -206,23 +221,21 @@ pub fn toggle_pin(row: usize) -> Result<(), String> {
     let script = format!(
         r#"
 var r = {row};
+var nl = String.fromCharCode(10);
 var pinnedMime = 'application/x-copyq-item-pinned';
-var fmts = formats(r);
-var isPin = fmts.indexOf(pinnedMime) !== -1;
 if (typeof plugins !== 'undefined' && plugins.itempinned) {{
-    if (isPin) {{
+    if (plugins.itempinned.isPinned(r)) {{
         plugins.itempinned.unpin(r);
     }} else {{
         plugins.itempinned.pin(r);
     }}
 }} else {{
-    var it = getItem(r);
-    if (isPin) {{
-        delete it[pinnedMime];
+    var fmts = str(read('?', r)).split(nl);
+    if (fmts.indexOf(pinnedMime) !== -1) {{
+        change(r, pinnedMime, null);
     }} else {{
-        it[pinnedMime] = '';
+        change(r, pinnedMime, '');
     }}
-    setItem(r, it);
 }}
 "#
     );
@@ -248,15 +261,16 @@ pub fn delete_item(row: usize) -> Result<(), String> {
     let script = format!(
         r#"
 var r = {row};
+var nl = String.fromCharCode(10);
 var pinnedMime = 'application/x-copyq-item-pinned';
-var fmts = formats(r);
-if (fmts.indexOf(pinnedMime) !== -1) {{
-    if (typeof plugins !== 'undefined' && plugins.itempinned) {{
+if (typeof plugins !== 'undefined' && plugins.itempinned) {{
+    if (plugins.itempinned.isPinned(r)) {{
         plugins.itempinned.unpin(r);
-    }} else {{
-        var it = getItem(r);
-        delete it[pinnedMime];
-        setItem(r, it);
+    }}
+}} else {{
+    var fmts = str(read('?', r)).split(nl);
+    if (fmts.indexOf(pinnedMime) !== -1) {{
+        change(r, pinnedMime, null);
     }}
 }}
 remove(r);
