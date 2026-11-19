@@ -73,8 +73,8 @@ pub fn attach_cursor_positioning(window: &ApplicationWindow, width: i32, height:
         apply_x11_position(xid, target_x, target_y);
 
         // Một số Window Manager X11 (như Muffin của Cinnamon) có thể tự đặt lại vị trí
-        // ngay sau tín hiệu MapRequest -> áp dụng lại 1 lần sau 25ms để đảm bảo đứng đúng chỗ.
-        glib::timeout_add_local_once(Duration::from_millis(25), move || {
+        // ngay sau tín hiệu MapRequest -> áp dụng lại 1 lần sau 40ms để đảm bảo đứng đúng chỗ.
+        glib::timeout_add_local_once(Duration::from_millis(40), move || {
             apply_x11_position(xid, target_x, target_y);
         });
     });

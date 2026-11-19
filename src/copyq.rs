@@ -32,8 +32,8 @@ fn copyq_bin() -> &'static str {
 /// Không ghi file tạm ra ổ cứng, không gọi shell, chỉ giao tiếp cục bộ qua tiến trình `copyq`.
 pub fn fetch_items(limit: usize) -> Result<Vec<ClipboardItem>, String> {
     let limit = limit.clamp(1, 200);
-    // Chỉ dùng các hàm API có sẵn trong CopyQ 7.1.0 (size, read, str, toBase64, print, plugins.itempinned).
-    // Không chứa ký tự backslash (\) hay ký tự ngoài ASCII để tránh CLI của CopyQ giải mã nhầm.
+    // Chỉ dùng các hàm lõi chắc chắn có trong CopyQ 7.1.0 (size, read, str, toBase64, print).
+    // Không phụ thuộc object `plugins`, không chứa backslash (\) hay ký tự ngoài ASCII.
     let script = format!(
         r#"
 var maxItems = {limit};
@@ -44,7 +44,6 @@ var imgMimes = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp
 var maxImgBytes = 12582912;
 var nl = String.fromCharCode(10);
 var cr = String.fromCharCode(13);
-var hasPinPlugin = (typeof plugins !== 'undefined' && plugins.itempinned);
 
 function byteLen(b) {{
     if (!b) {{ return 0; }}
@@ -70,38 +69,45 @@ function getFormats(row) {{
 }}
 
 for (var i = 0; i < count; i++) {{
-    var fmts = getFormats(i);
-    var isPin = hasPinPlugin
-        ? (plugins.itempinned.isPinned(i) ? 1 : 0)
-        : (fmts.indexOf(pinnedMime) !== -1 ? 1 : 0);
-    var imgMime = '';
-    for (var k = 0; k < imgMimes.length; k++) {{
-        if (fmts.indexOf(imgMimes[k]) !== -1) {{
-            imgMime = imgMimes[k];
-            break;
+    try {{
+        var fmts = getFormats(i);
+        var isPin = fmts.indexOf(pinnedMime) !== -1 ? 1 : 0;
+        var imgMime = '';
+        for (var k = 0; k < imgMimes.length; k++) {{
+            if (fmts.indexOf(imgMimes[k]) !== -1) {{
+                imgMime = imgMimes[k];
+                break;
+            }}
         }}
-    }}
-    if (imgMime !== '') {{
-        var rawImg = read(imgMime, i);
-        var n = byteLen(rawImg);
-        if (n > 0 && n <= maxImgBytes) {{
-            print('I ' + i + ' ' + isPin + ' ' + cleanB64(rawImg) + nl);
+        if (imgMime !== '') {{
+            var rawImg = read(imgMime, i);
+            var n = byteLen(rawImg);
+            if (n > 0 && n <= maxImgBytes) {{
+                print('I ' + i + ' ' + isPin + ' ' + cleanB64(rawImg) + nl);
+            }} else {{
+                print('L ' + i + ' ' + isPin + ' ' + nl);
+            }}
         }} else {{
-            print('L ' + i + ' ' + isPin + ' ' + nl);
+            var rawTxt = '';
+            if (fmts.indexOf('text/plain') !== -1) {{
+                rawTxt = str(read('text/plain', i));
+            }} else if (fmts.indexOf('text/plain;charset=utf-8') !== -1) {{
+                rawTxt = str(read('text/plain;charset=utf-8', i));
+            }} else if (fmts.indexOf('text/uri-list') !== -1) {{
+                rawTxt = str(read('text/uri-list', i));
+            }} else {{
+                rawTxt = str(read(i));
+            }}
+            if (typeof rawTxt !== 'string') {{
+                rawTxt = '';
+            }}
+            if (rawTxt.length > 4096) {{
+                rawTxt = rawTxt.substring(0, 4096);
+            }}
+            print('T ' + i + ' ' + isPin + ' ' + cleanB64(rawTxt) + nl);
         }}
-    }} else {{
-        var rawTxt = '';
-        if (fmts.indexOf('text/plain') !== -1) {{
-            rawTxt = str(read('text/plain', i));
-        }} else if (fmts.indexOf('text/uri-list') !== -1) {{
-            rawTxt = str(read('text/uri-list', i));
-        }} else {{
-            rawTxt = str(read(i));
-        }}
-        if (rawTxt.length > 4096) {{
-            rawTxt = rawTxt.substring(0, 4096);
-        }}
-        print('T ' + i + ' ' + isPin + ' ' + cleanB64(rawTxt) + nl);
+    }} catch (itemErr) {{
+        /* skip unreadable item */
     }}
 }}
 "#
@@ -191,14 +197,14 @@ fn parse_protocol_output(stdout: &str) -> Vec<ClipboardItem> {
 /// Chọn mục từ CopyQ và (nếu bật `auto_paste`) tự động dán sau khi popup đóng.
 pub fn select_and_paste(row: usize, auto_paste: bool, plain_text: bool) -> Result<(), String> {
     let paste_tail = if auto_paste {
-        "sleep(130); paste();"
+        "sleep(160); paste();"
     } else {
         ""
     };
 
     let script = if plain_text {
         format!(
-            "var r = {row}; var t = str(read('text/plain', r)); if (t.length === 0) {{ t = str(read(r)); }} copy(t); {paste_tail}"
+            "var r = {row}; var t = str(read('text/plain', r)); if (!t || t.length === 0) {{ t = str(read(r)); }} copy(t); {paste_tail}"
         )
     } else {
         format!("var r = {row}; select(r); {paste_tail}")
@@ -222,20 +228,21 @@ pub fn toggle_pin(row: usize) -> Result<(), String> {
         r#"
 var r = {row};
 var nl = String.fromCharCode(10);
+var cr = String.fromCharCode(13);
 var pinnedMime = 'application/x-copyq-item-pinned';
-if (typeof plugins !== 'undefined' && plugins.itempinned) {{
-    if (plugins.itempinned.isPinned(r)) {{
-        plugins.itempinned.unpin(r);
-    }} else {{
-        plugins.itempinned.pin(r);
+var raw = str(read('?', r));
+var fmts = raw ? raw.split(nl) : [];
+var isPin = false;
+for (var j = 0; j < fmts.length; j++) {{
+    if (fmts[j].split(cr).join('').trim() === pinnedMime) {{
+        isPin = true;
+        break;
     }}
+}}
+if (isPin) {{
+    change(r, pinnedMime, undefined);
 }} else {{
-    var fmts = str(read('?', r)).split(nl);
-    if (fmts.indexOf(pinnedMime) !== -1) {{
-        change(r, pinnedMime, null);
-    }} else {{
-        change(r, pinnedMime, '');
-    }}
+    change(r, pinnedMime, '');
 }}
 "#
     );
@@ -262,15 +269,14 @@ pub fn delete_item(row: usize) -> Result<(), String> {
         r#"
 var r = {row};
 var nl = String.fromCharCode(10);
+var cr = String.fromCharCode(13);
 var pinnedMime = 'application/x-copyq-item-pinned';
-if (typeof plugins !== 'undefined' && plugins.itempinned) {{
-    if (plugins.itempinned.isPinned(r)) {{
-        plugins.itempinned.unpin(r);
-    }}
-}} else {{
-    var fmts = str(read('?', r)).split(nl);
-    if (fmts.indexOf(pinnedMime) !== -1) {{
-        change(r, pinnedMime, null);
+var raw = str(read('?', r));
+var fmts = raw ? raw.split(nl) : [];
+for (var j = 0; j < fmts.length; j++) {{
+    if (fmts[j].split(cr).join('').trim() === pinnedMime) {{
+        change(r, pinnedMime, undefined);
+        break;
     }}
 }}
 remove(r);

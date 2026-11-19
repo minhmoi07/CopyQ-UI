@@ -548,8 +548,9 @@ impl UiHandles {
                 pop.popdown();
                 let ui_idle = ui.clone();
                 glib::idle_add_local_once(move || {
-                    if copyq::delete_item(copyq_row).is_ok() {
-                        ui_idle.reload_from_copyq();
+                    match copyq::delete_item(copyq_row) {
+                        Ok(()) => ui_idle.reload_from_copyq(),
+                        Err(err) => eprintln!("copyq-ui: {err}"),
                     }
                 });
             });
@@ -586,8 +587,9 @@ impl UiHandles {
             pin_btn.connect_clicked(move |_| {
                 let ui_idle = ui.clone();
                 glib::idle_add_local_once(move || {
-                    if copyq::toggle_pin(copyq_row).is_ok() {
-                        ui_idle.reload_from_copyq();
+                    match copyq::toggle_pin(copyq_row) {
+                        Ok(()) => ui_idle.reload_from_copyq(),
+                        Err(err) => eprintln!("copyq-ui: {err}"),
                     }
                 });
             });
