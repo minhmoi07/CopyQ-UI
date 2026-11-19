@@ -13,6 +13,7 @@ use crate::config::PositionMode;
 
 const EDGE_MARGIN: i32 = 12;
 const BOTTOM_TASKBAR_PAD: i32 = 52;
+const POS_TOLERANCE: i32 = 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScreenBounds {
@@ -24,7 +25,7 @@ pub struct ScreenBounds {
 }
 
 /// Tính tọa độ đặt cửa sổ theo chế độ (`cursor`, `bottom-right`, `center`),
-/// tự lật lên trên / sang trái nếu con trỏ nằm gần mép dưới hoặc mép phải (như khung chat Facebook).
+/// tự lật lên trên / sang trái nếu con trỏ nằm gần mép dưới hoặc mép phải (như khung chat Facebook/Zalo).
 pub fn compute_popup_position(
     mode: PositionMode,
     cursor_x: i32,
@@ -71,7 +72,11 @@ pub fn compute_popup_position(
     (x, y)
 }
 
-/// Gắn cơ chế đặt vị trí chuẩn EWMH (`_NET_MOVERESIZE_WINDOW`) cho Linux Mint Cinnamon (Muffin X11).
+/// Đặt vị trí cửa sổ không bị giật/nháy góc trên trái và chống trượt trên app web nặng (Zalo, Facebook...):
+/// 1. Bắt tọa độ chuột ngay thời điểm bấm Win+V.
+/// 2. Tạm ẩn độ mờ (`opacity = 0.0`) trong lúc Window Manager (Muffin) đặt cửa sổ.
+/// 3. Dịch trước khi map (`realize`), sau đó gửi chuẩn EWMH `_NET_MOVERESIZE_WINDOW` và
+///    xác nhận tọa độ thật trên màn hình (`translate_coordinates`) cho tới khi đứng đúng chỗ mới bật `opacity = 1.0`.
 pub fn attach_positioning(
     window: &ApplicationWindow,
     mode: PositionMode,
@@ -82,61 +87,114 @@ pub fn attach_positioning(
         return;
     }
 
-    let cached_target: Rc<Cell<Option<(u32, i32, i32)>>> = Rc::new(Cell::new(None));
-    let active_moved = Rc::new(Cell::new(false));
+    // Chụp ngay tọa độ đích tại thời điểm bấm Win+V (trước khi người dùng kịp nhúc nhích chuột)
+    let Some((target_x, target_y)) = compute_target_from_pointer(mode, width, height) else {
+        return;
+    };
 
-    // Bước 1: Ngay khi cửa sổ map -> flush GTK X11, tính tọa độ 1 lần theo vị trí chuột lúc bấm phím tắt, và di chuyển.
+    // Ẩn độ mờ tạm thời để triệt tiêu hoàn toàn hiện tượng nháy ở góc trên bên trái rồi nhảy sang
+    window.set_opacity(0.0);
+
+    // Chốt an toàn tuyệt đối: tối đa 220ms luôn đảm bảo cửa sổ hiện rõ 100%
     {
-        let cached = cached_target.clone();
-        window.connect_map(move |win| {
-            if cached.get().is_some() {
-                return;
+        let win_weak = window.downgrade();
+        glib::timeout_add_local_once(Duration::from_millis(220), move || {
+            if let Some(w) = win_weak.upgrade() {
+                w.set_opacity(1.0);
             }
-            if let Some(display) = gdk::Display::default() {
-                display.sync();
+        });
+    }
+
+    // Bước 1: Trước khi XMapWindow chạy (`realize`), gợi ý sẵn tọa độ (target_x, target_y)
+    window.connect_realize(move |win| {
+        if let Some(display) = gdk::Display::default() {
+            display.sync();
+        }
+        if let Some(xid) = get_window_xid(win) {
+            if let Ok((conn, _)) = x11rb::connect(None) {
+                let aux = ConfigureWindowAux::new().x(target_x).y(target_y);
+                let _ = conn.configure_window(xid, &aux);
+                let _ = conn.flush();
             }
-            let Some((xid, tx, ty)) = resolve_x11_target(win, mode, width, height) else {
-                return;
+        }
+    });
+
+    // Bước 2: Ngay khi map -> giữ 1 kết nối X11 duy nhất, gửi EWMH move & xác nhận tọa độ thật trước khi hiện
+    let started = Rc::new(Cell::new(false));
+    window.connect_map(move |win| {
+        if started.replace(true) {
+            return;
+        }
+        if let Some(display) = gdk::Display::default() {
+            display.sync();
+        }
+        let Some(xid) = get_window_xid(win) else {
+            win.set_opacity(1.0);
+            return;
+        };
+        let Ok((conn, screen_num)) = x11rb::connect(None) else {
+            win.set_opacity(1.0);
+            return;
+        };
+        let Some(root) = conn.setup().roots.get(screen_num).map(|s| s.root) else {
+            win.set_opacity(1.0);
+            return;
+        };
+        let moveresize_atom = conn
+            .intern_atom(false, b"_NET_MOVERESIZE_WINDOW")
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|r| r.atom);
+
+        send_ewmh_move(&conn, root, moveresize_atom, xid, target_x, target_y);
+
+        let win_weak = win.downgrade();
+        let ticks = Cell::new(0u8);
+
+        glib::timeout_add_local(Duration::from_millis(12), move || {
+            let Some(w) = win_weak.upgrade() else {
+                return glib::ControlFlow::Break;
             };
-            cached.set(Some((xid, tx, ty)));
-            apply_x11_position(xid, tx, ty);
+            let t = ticks.get().saturating_add(1);
+            ticks.set(t);
 
-            // Dự phòng sau 25ms nếu Window Manager (Muffin) đặt lại vị trí sau MapRequest
-            glib::timeout_add_local_once(Duration::from_millis(25), move || {
-                apply_x11_position(xid, tx, ty);
-            });
-        });
-    }
+            let at_target = query_actual_position(&conn, root, xid)
+                .map(|(ax, ay)| {
+                    (ax - target_x).abs() <= POS_TOLERANCE && (ay - target_y).abs() <= POS_TOLERANCE
+                })
+                .unwrap_or(false);
 
-    // Bước 2: Ngay khi Muffin hoàn tất cấp focus lần đầu (`is-active = true`) -> gửi _NET_MOVERESIZE_WINDOW 1 lần nữa.
-    {
-        let cached = cached_target;
-        window.connect_is_active_notify(move |win| {
-            if !win.is_active() || active_moved.get() {
-                return;
+            if at_target {
+                // Chỉ bật hiển thị khi Muffin đã hoàn tất cấp focus (`is_active`) hoặc sau tối đa ~96ms
+                if w.is_active() || t >= 8 {
+                    w.set_opacity(1.0);
+                    return glib::ControlFlow::Break;
+                }
+            } else {
+                send_ewmh_move(&conn, root, moveresize_atom, xid, target_x, target_y);
             }
-            active_moved.set(true);
-            let target = cached
-                .get()
-                .or_else(|| resolve_x11_target(win, mode, width, height));
-            if let Some((xid, tx, ty)) = target {
-                cached.set(Some((xid, tx, ty)));
-                apply_x11_position(xid, tx, ty);
+
+            if t >= 16 {
+                w.set_opacity(1.0);
+                return glib::ControlFlow::Break;
             }
+
+            glib::ControlFlow::Continue
         });
-    }
+    });
 }
 
-fn resolve_x11_target(
-    window: &ApplicationWindow,
+fn get_window_xid(window: &ApplicationWindow) -> Option<u32> {
+    let surface = window.surface()?;
+    let x11_surface = surface.downcast_ref::<X11Surface>()?;
+    u32::try_from(x11_surface.xid()).ok()
+}
+
+fn compute_target_from_pointer(
     mode: PositionMode,
     win_w: i32,
     win_h: i32,
-) -> Option<(u32, i32, i32)> {
-    let surface = window.surface()?;
-    let x11_surface = surface.downcast_ref::<X11Surface>()?;
-    let xid = u32::try_from(x11_surface.xid()).ok()?;
-
+) -> Option<(i32, i32)> {
     let (conn, screen_num) = x11rb::connect(None).ok()?;
     let screen = conn.setup().roots.get(screen_num)?;
     let ptr = conn.query_pointer(screen.root).ok()?.reply().ok()?;
@@ -179,39 +237,40 @@ fn resolve_x11_target(
         }
     }
 
-    let (tx, ty) = compute_popup_position(mode, cursor_x, cursor_y, win_w, win_h, bounds);
-    Some((xid, tx, ty))
+    Some(compute_popup_position(
+        mode, cursor_x, cursor_y, win_w, win_h, bounds,
+    ))
 }
 
-fn apply_x11_position(xid: u32, x: i32, y: i32) {
-    let Ok((conn, screen_num)) = x11rb::connect(None) else {
-        return;
-    };
-    let Some(screen) = conn.setup().roots.get(screen_num) else {
-        return;
-    };
+fn query_actual_position<C: Connection>(conn: &C, root: u32, xid: u32) -> Option<(i32, i32)> {
+    let reply = conn
+        .translate_coordinates(xid, root, 0, 0)
+        .ok()?
+        .reply()
+        .ok()?;
+    Some((i32::from(reply.dst_x), i32::from(reply.dst_y)))
+}
 
-    // 1. Chuẩn EWMH _NET_MOVERESIZE_WINDOW (giống wmctrl / xdotool — Muffin của Cinnamon luôn tuân thủ):
-    //    flags = StaticGravity (10) | X (1<<8) | Y (1<<9) | Source=Pager/User (2<<12)
-    if let Ok(cookie) = conn.intern_atom(false, b"_NET_MOVERESIZE_WINDOW") {
-        if let Ok(reply) = cookie.reply() {
-            let flags: u32 = 10 | (1 << 8) | (1 << 9) | (2 << 12);
-            let event = ClientMessageEvent::new(
-                32,
-                xid,
-                reply.atom,
-                [flags, x as u32, y as u32, 0, 0],
-            );
-            let _ = conn.send_event(
-                false,
-                screen.root,
-                EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
-                event,
-            );
-        }
+fn send_ewmh_move<C: Connection>(
+    conn: &C,
+    root: u32,
+    moveresize_atom: Option<u32>,
+    xid: u32,
+    x: i32,
+    y: i32,
+) {
+    // Chuẩn EWMH _NET_MOVERESIZE_WINDOW: StaticGravity (10) | X (1<<8) | Y (1<<9) | Source=Pager (2<<12)
+    if let Some(atom) = moveresize_atom {
+        let flags: u32 = 10 | (1 << 8) | (1 << 9) | (2 << 12);
+        let event = ClientMessageEvent::new(32, xid, atom, [flags, x as u32, y as u32, 0, 0]);
+        let _ = conn.send_event(
+            false,
+            root,
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+            event,
+        );
     }
 
-    // 2. Dự phòng thêm ConfigureWindow trực tiếp cho các WM tối giản
     let aux = ConfigureWindowAux::new().x(x).y(y);
     let _ = conn.configure_window(xid, &aux);
     let _ = conn.flush();
