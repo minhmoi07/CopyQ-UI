@@ -357,7 +357,7 @@ pub fn normalize_text(raw: &str) -> (String, String) {
 
     let search = cleaned_lines.join(" ").to_lowercase();
 
-    // Giữ tối đa 4 dòng đầu và tối đa 300 ký tự cho preview thẻ (Label GTK4 sẽ khóa ở 3 dòng + "...")
+    // Giữ tối đa 4 dòng đầu và tối đa 300 ký tự cho preview thẻ (Label GTK3 sẽ khóa ở 3 dòng + "...")
     let mut display = String::new();
     let mut char_count = 0usize;
     for (idx, line) in cleaned_lines.iter().take(4).enumerate() {

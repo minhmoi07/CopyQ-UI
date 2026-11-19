@@ -2,15 +2,13 @@
 name = "copyq-ui"
 version = "0.1.0"
 edition = "2021"
-description = "Lightweight, secure GTK4 popup UI for CopyQ on Linux Mint Cinnamon"
+description = "Lightweight, native GTK3 popup UI for CopyQ on Linux Mint Cinnamon"
 license = "MIT"
 
-# Security-by-design: chỉ dùng thư viện đồ họa cục bộ chính chủ (GTK4 + X11).
+# Security-by-design: chỉ đúng 1 thư viện duy nhất (GTK3 bản địa của Linux Mint Cinnamon).
 # Không thư viện mạng, không telemetry, không gọi shell, không ghi clipboard ra đĩa.
 [dependencies]
-gtk4 = { version = "0.9", features = ["v4_14"] }
-gdk4-x11 = "0.9"
-x11rb = "0.13"
+gtk = { version = "0.18", features = ["v3_24"] }
 
 [profile.release]
 opt-level = "z"

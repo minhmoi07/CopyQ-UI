@@ -5,7 +5,6 @@ mod copyq;
 mod position;
 mod ui;
 
-use gtk4 as gtk;
 use gtk::glib;
 use gtk::prelude::*;
 
@@ -20,7 +19,7 @@ fn main() -> glib::ExitCode {
             }
             "-h" | "--help" => {
                 println!(
-                    "copyq-ui {} — Giao diện popup GTK4 siêu nhẹ cho CopyQ\n\n\
+                    "copyq-ui {} — Giao diện popup GTK3 bản địa siêu nhẹ cho CopyQ\n\n\
                      Cách dùng:\n\
                        copyq-ui             Bật/tắt cửa sổ popup (gắn vào phím Win+V)\n\
                        copyq-ui --version   Xem phiên bản\n\
