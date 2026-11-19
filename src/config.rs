@@ -68,6 +68,8 @@ impl ImageFit {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PositionMode {
     Cursor,
+    BottomRight,
+    Center,
     Default,
 }
 
@@ -75,12 +77,16 @@ impl PositionMode {
     pub fn as_str(self) -> &'static str {
         match self {
             PositionMode::Cursor => "cursor",
+            PositionMode::BottomRight => "bottom-right",
+            PositionMode::Center => "center",
             PositionMode::Default => "default",
         }
     }
 
     pub fn from_str(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
+            "bottom-right" | "bottom_right" => PositionMode::BottomRight,
+            "center" => PositionMode::Center,
             "default" => PositionMode::Default,
             _ => PositionMode::Cursor,
         }

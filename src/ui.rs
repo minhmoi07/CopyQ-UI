@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::mpsc::{self, TryRecvError};
 use std::time::Duration;
 
 use gtk4 as gtk;
@@ -12,7 +13,7 @@ use gtk::{
     ScrolledWindow, SearchEntry, SelectionMode, WindowHandle,
 };
 
-use crate::config::{AppConfig, ImageFit, PositionMode, Theme, DEFAULT_CSS};
+use crate::config::{AppConfig, ImageFit, Theme, DEFAULT_CSS};
 use crate::copyq::{self, ClipboardItem, ItemContent};
 use crate::position;
 
@@ -40,6 +41,7 @@ struct AppState {
     visible_indices: Vec<usize>,
     filter: FilterTab,
     query: String,
+    loading: bool,
     error_message: Option<String>,
     zoomed_item_index: Option<usize>,
 }
@@ -58,6 +60,7 @@ struct UiHandles {
     zoom_picture: Picture,
     state: Rc<RefCell<AppState>>,
     popover_open_count: Rc<Cell<u32>>,
+    load_generation: Rc<Cell<u64>>,
 }
 
 pub fn build_ui(app: &Application) {
@@ -100,7 +103,7 @@ pub fn build_ui(app: &Application) {
     search_entry.add_css_class("search-input");
     search_entry.set_placeholder_text(Some("Tìm kiếm..."));
     search_entry.set_hexpand(true);
-    search_entry.set_search_delay(60);
+    search_entry.set_search_delay(20);
 
     let theme_btn = Button::new();
     theme_btn.add_css_class("theme-toggle-btn");
@@ -188,6 +191,7 @@ pub fn build_ui(app: &Application) {
         visible_indices: Vec::new(),
         filter: FilterTab::All,
         query: String::new(),
+        loading: true,
         error_message: None,
         zoomed_item_index: None,
     }));
@@ -205,11 +209,11 @@ pub fn build_ui(app: &Application) {
         zoom_picture,
         state,
         popover_open_count: Rc::new(Cell::new(0)),
+        load_generation: Rc::new(Cell::new(0)),
     };
 
     handles.apply_theme();
     handles.update_filter_tabs();
-    handles.reload_from_copyq();
 
     // Nút đổi Sáng / Tối
     {
@@ -271,14 +275,12 @@ pub fn build_ui(app: &Application) {
         });
     }
 
-    // Tự động đặt popup ngay gần con trỏ chuột (tự lật lên trên nếu đang ở khung chat sát đáy)
+    // Tự động đặt popup theo cấu hình (`cursor`, `bottom-right`, `center`) bằng chuẩn EWMH trên X11
     let (pos_mode, win_w, win_h) = {
         let st = handles.state.borrow();
         (st.config.position, st.config.width, st.config.height)
     };
-    if pos_mode == PositionMode::Cursor {
-        position::attach_cursor_positioning(&window, win_w, win_h);
-    }
+    position::attach_positioning(&window, pos_mode, win_w, win_h);
 
     // Điều khiển bàn phím toàn cửa sổ (Capture phase)
     setup_keyboard_controller(&window, handles.clone());
@@ -286,8 +288,10 @@ pub fn build_ui(app: &Application) {
     // Tự đóng khi click ra ngoài (có cơ chế bảo vệ để không đóng nhầm khi mở popover ⋯)
     setup_unfocus_autoclose(&window, handles.clone());
 
+    // Hiện cửa sổ NGAY LẬP TỨC trước khi đọc CopyQ để cảm giác bật Win+V tức thì không bị khựng
     window.present();
     search_entry.grab_focus();
+    handles.reload_from_copyq();
 }
 
 impl UiHandles {
@@ -320,21 +324,88 @@ impl UiHandles {
     }
 
     fn reload_from_copyq(&self) {
-        let max_items = self.state.borrow().config.max_items;
-        match copyq::fetch_items(max_items) {
-            Ok(raw_items) => {
-                let ui_items: Vec<UiItem> = raw_items.into_iter().map(convert_item).collect();
-                let mut st = self.state.borrow_mut();
-                st.items = ui_items;
-                st.error_message = None;
+        const FIRST_BATCH: usize = 10;
+
+        let generation = self.load_generation.get().wrapping_add(1);
+        self.load_generation.set(generation);
+
+        let max_items = {
+            let mut st = self.state.borrow_mut();
+            st.loading = true;
+            st.config.max_items
+        };
+
+        let (tx, rx) = mpsc::channel::<(u8, Result<Vec<ClipboardItem>, String>)>();
+        std::thread::spawn(move || {
+            let first_limit = max_items.min(FIRST_BATCH);
+            match copyq::fetch_items_range(0, first_limit) {
+                Ok((total, items1)) => {
+                    let has_more = total > first_limit && max_items > first_limit;
+                    let _ = tx.send((1, Ok(items1)));
+                    if has_more {
+                        let rest_limit = max_items - first_limit;
+                        if let Ok((_, items2)) = copyq::fetch_items_range(first_limit, rest_limit) {
+                            let _ = tx.send((2, Ok(items2)));
+                        }
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send((1, Err(err)));
+                }
             }
-            Err(err) => {
-                let mut st = self.state.borrow_mut();
-                st.items.clear();
-                st.error_message = Some(err);
+        });
+
+        let ui = self.clone();
+        glib::timeout_add_local(Duration::from_millis(8), move || {
+            if ui.load_generation.get() != generation || !ui.window.is_visible() {
+                return glib::ControlFlow::Break;
             }
-        }
-        self.rebuild_list(0);
+            if ui.popover_open_count.get() > 0 {
+                return glib::ControlFlow::Continue;
+            }
+            loop {
+                match rx.try_recv() {
+                    Ok((stage, result)) => match result {
+                        Ok(raw_items) => {
+                            let ui_items: Vec<UiItem> =
+                                raw_items.into_iter().map(convert_item).collect();
+                            let keep_idx = ui
+                                .list_box
+                                .selected_row()
+                                .and_then(|r| usize::try_from(r.index()).ok())
+                                .unwrap_or(0);
+                            {
+                                let mut st = ui.state.borrow_mut();
+                                st.loading = false;
+                                st.error_message = None;
+                                if stage == 1 {
+                                    st.items = ui_items;
+                                } else {
+                                    st.items.extend(ui_items);
+                                }
+                            }
+                            if stage == 1 {
+                                ui.rebuild_list(0);
+                            } else {
+                                ui.rebuild_list(keep_idx);
+                            }
+                        }
+                        Err(err) => {
+                            {
+                                let mut st = ui.state.borrow_mut();
+                                st.loading = false;
+                                st.items.clear();
+                                st.error_message = Some(err);
+                            }
+                            ui.rebuild_list(0);
+                            return glib::ControlFlow::Break;
+                        }
+                    },
+                    Err(TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                    Err(TryRecvError::Disconnected) => return glib::ControlFlow::Break,
+                }
+            }
+        });
     }
 
     fn rebuild_list(&self, preferred_visible_index: usize) {
@@ -377,6 +448,8 @@ impl UiHandles {
 
             let empty_msg = if let Some(err) = &st.error_message {
                 err.clone()
+            } else if st.loading {
+                String::new()
             } else if !query_lower.is_empty() {
                 "Không tìm thấy mục nào khớp".to_string()
             } else if filter == FilterTab::Pinned {

@@ -28,17 +28,20 @@ fn copyq_bin() -> &'static str {
     }
 }
 
-/// Đọc tối đa `limit` mục gần nhất từ CopyQ đang chạy ngầm.
+/// Đọc một khoảng mục `[start .. start + limit)` từ CopyQ đang chạy ngầm.
+/// Trả về `(tổng_số_mục_trong_copyq, danh_sách_mục_trong_khoảng)`.
 /// Không ghi file tạm ra ổ cứng, không gọi shell, chỉ giao tiếp cục bộ qua tiến trình `copyq`.
-pub fn fetch_items(limit: usize) -> Result<Vec<ClipboardItem>, String> {
+pub fn fetch_items_range(start: usize, limit: usize) -> Result<(usize, Vec<ClipboardItem>), String> {
     let limit = limit.clamp(1, 200);
     // Chỉ dùng các hàm lõi chắc chắn có trong CopyQ 7.1.0 (size, read, str, toBase64, print).
     // Không phụ thuộc object `plugins`, không chứa backslash (\) hay ký tự ngoài ASCII.
     let script = format!(
         r#"
+var startRow = {start};
 var maxItems = {limit};
 var total = size();
-var count = total < maxItems ? total : maxItems;
+var endRow = startRow + maxItems;
+if (endRow > total) {{ endRow = total; }}
 var pinnedMime = 'application/x-copyq-item-pinned';
 var imgMimes = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp'];
 var maxImgBytes = 12582912;
@@ -68,7 +71,9 @@ function getFormats(row) {{
     return out;
 }}
 
-for (var i = 0; i < count; i++) {{
+print('M ' + total + nl);
+
+for (var i = startRow; i < endRow; i++) {{
     try {{
         var fmts = getFormats(i);
         var isPin = fmts.indexOf(pinnedMime) !== -1 ? 1 : 0;
@@ -101,8 +106,8 @@ for (var i = 0; i < count; i++) {{
             if (typeof rawTxt !== 'string') {{
                 rawTxt = '';
             }}
-            if (rawTxt.length > 4096) {{
-                rawTxt = rawTxt.substring(0, 4096);
+            if (rawTxt.length > 1500) {{
+                rawTxt = rawTxt.substring(0, 1500);
             }}
             print('T ' + i + ' ' + isPin + ' ' + cleanB64(rawTxt) + nl);
         }}
@@ -132,9 +137,16 @@ for (var i = 0; i < count; i++) {{
     Ok(parse_protocol_output(&stdout))
 }
 
-fn parse_protocol_output(stdout: &str) -> Vec<ClipboardItem> {
+fn parse_protocol_output(stdout: &str) -> (usize, Vec<ClipboardItem>) {
+    let mut total = 0usize;
     let mut items = Vec::new();
     for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("M ") {
+            if let Ok(n) = rest.trim().parse::<usize>() {
+                total = n;
+            }
+            continue;
+        }
         let mut parts = line.splitn(4, ' ');
         let Some(kind) = parts.next() else {
             continue;
@@ -191,13 +203,13 @@ fn parse_protocol_output(stdout: &str) -> Vec<ClipboardItem> {
             _ => {}
         }
     }
-    items
+    (total, items)
 }
 
 /// Chọn mục từ CopyQ và (nếu bật `auto_paste`) tự động dán sau khi popup đóng.
 pub fn select_and_paste(row: usize, auto_paste: bool, plain_text: bool) -> Result<(), String> {
     let paste_tail = if auto_paste {
-        "sleep(160); paste();"
+        "sleep(90); paste();"
     } else {
         ""
     };
@@ -444,8 +456,9 @@ mod tests {
 
     #[test]
     fn parses_protocol_lines() {
-        let out = "T 0 1 SGVsbG8=\nI 1 0 iVBORw==\n";
-        let items = parse_protocol_output(out);
+        let out = "M 12\nT 0 1 SGVsbG8=\nI 1 0 iVBORw==\n";
+        let (total, items) = parse_protocol_output(out);
+        assert_eq!(total, 12);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].row, 0);
         assert!(items[0].pinned);

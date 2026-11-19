@@ -26,7 +26,7 @@ window.popup-window {
 }
 
 .search-input {
-    min-height: 30px;
+    min-height: 32px;
     border-radius: 8px;
     padding: 0 8px;
     font-size: 12.5px;
@@ -324,7 +324,7 @@ window.theme-dark .footer-bar {
  * ============================================================ */
 window.theme-light .popup-container {
     background-color: #f3f4f6;
-    border-color: #d4d9e2;
+    border-color: #bfc7d4;
     color: #1c2026;
 }
 
@@ -405,7 +405,7 @@ window.theme-light .img-frame {
 
 window.theme-light .card-icon-btn,
 window.theme-light .card-menu-btn > togglebutton {
-    color: #687280;
+    color: #4b5563;
 }
 
 window.theme-light .card-icon-btn:hover,
