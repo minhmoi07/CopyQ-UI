@@ -18,10 +18,10 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install GTK4 development headers
+      - name: Install GTK3 development headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-4-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev pkg-config
 
       - name: Check Rust toolchain
         run: |
