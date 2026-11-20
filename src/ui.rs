@@ -4,13 +4,13 @@ use std::rc::Rc;
 use std::sync::mpsc::{self, TryRecvError};
 use std::time::Duration;
 
-use gtk::gdk_pixbuf::{InterpType, Pixbuf, PixbufLoader};
+use gtk::gdk_pixbuf::{Pixbuf, PixbufLoader};
 use gtk::prelude::*;
 use gtk::{
     cairo, gdk, glib, pango, Align, Application, ApplicationWindow, Button, CssProvider, EventBox,
-    IconSize, IconTheme, Image, Justification, Label, ListBox, ListBoxRow, MenuButton, Orientation,
-    Overlay, PolicyType, Popover, PositionType, ReliefStyle, ScrolledWindow, SearchEntry,
-    SelectionMode, Settings, StyleContext,
+    IconSize, IconTheme, Image, Justification, Label, ListBox, ListBoxRow, Orientation, Overlay,
+    PolicyType, Popover, PositionType, ReliefStyle, ScrolledWindow, SearchEntry, SelectionMode,
+    Settings, StyleContext,
 };
 
 use crate::config::{AppConfig, ImageFit, Theme, DEFAULT_CSS};
@@ -33,7 +33,6 @@ enum UiItemKind {
     },
     Image {
         thumb: Option<Pixbuf>,
-        full: Option<Pixbuf>,
     },
 }
 
@@ -68,8 +67,10 @@ struct UiHandles {
     zoom_overlay: gtk::Box,
     zoom_image: Image,
     state: Rc<RefCell<AppState>>,
+    active_popover: Rc<RefCell<Option<Popover>>>,
     popover_open_count: Rc<Cell<u32>>,
     load_generation: Rc<Cell<u64>>,
+    zoom_generation: Rc<Cell<u64>>,
 }
 
 pub fn build_ui(app: &Application) {
@@ -236,8 +237,10 @@ pub fn build_ui(app: &Application) {
         zoom_overlay: zoom_overlay.clone(),
         zoom_image,
         state,
+        active_popover: Rc::new(RefCell::new(None)),
         popover_open_count: Rc::new(Cell::new(0)),
         load_generation: Rc::new(Cell::new(0)),
+        zoom_generation: Rc::new(Cell::new(0)),
     };
 
     handles.apply_theme();
@@ -357,7 +360,7 @@ impl UiHandles {
     }
 
     fn reload_from_copyq(&self) {
-        const FIRST_BATCH: usize = 10;
+        const FIRST_BATCH: usize = 8;
 
         let generation = self.load_generation.get().wrapping_add(1);
         self.load_generation.set(generation);
@@ -405,25 +408,56 @@ impl UiHandles {
                                 .into_iter()
                                 .map(|it| convert_item(it, thumb_w, image_fit))
                                 .collect();
-                            let keep_idx = ui
-                                .list_box
-                                .selected_row()
-                                .and_then(|r| usize::try_from(r.index()).ok())
-                                .unwrap_or(0);
-                            {
-                                let mut st = ui.state.borrow_mut();
-                                st.loading = false;
-                                st.error_message = None;
-                                if stage == 1 {
-                                    st.items = ui_items;
-                                } else {
-                                    st.items.extend(ui_items);
-                                }
-                            }
                             if stage == 1 {
+                                {
+                                    let mut st = ui.state.borrow_mut();
+                                    st.loading = false;
+                                    st.error_message = None;
+                                    st.items = ui_items;
+                                }
                                 ui.rebuild_list(0);
                             } else {
-                                ui.rebuild_list(keep_idx);
+                                let keep_idx = ui
+                                    .list_box
+                                    .selected_row()
+                                    .and_then(|r| usize::try_from(r.index()).ok())
+                                    .unwrap_or(0);
+                                let has_pinned_new = ui_items.iter().any(|it| it.pinned);
+                                let (need_full_rebuild, newly_visible) = {
+                                    let mut st = ui.state.borrow_mut();
+                                    st.loading = false;
+                                    st.error_message = None;
+                                    let start_idx = st.items.len();
+                                    let was_empty = st.visible_indices.is_empty();
+                                    st.items.extend(ui_items);
+                                    if has_pinned_new || was_empty {
+                                        (true, Vec::new())
+                                    } else {
+                                        let query_lower = st.query.trim().to_lowercase();
+                                        let filter = st.filter;
+                                        let mut added = Vec::new();
+                                        for idx in start_idx..st.items.len() {
+                                            if item_matches_filter(
+                                                &st.items[idx],
+                                                filter,
+                                                &query_lower,
+                                            ) {
+                                                added.push(idx);
+                                            }
+                                        }
+                                        st.visible_indices.extend_from_slice(&added);
+                                        (false, added)
+                                    }
+                                };
+                                if need_full_rebuild {
+                                    ui.rebuild_list(keep_idx);
+                                } else {
+                                    for idx in newly_visible {
+                                        let row_widget = ui.build_card_row(idx);
+                                        row_widget.show_all();
+                                        ui.list_box.add(&row_widget);
+                                    }
+                                }
                             }
                         }
                         Err(err) => {
@@ -445,7 +479,7 @@ impl UiHandles {
     }
 
     fn rebuild_list(&self, preferred_visible_index: usize) {
-        self.popover_open_count.set(0);
+        self.close_active_popover();
 
         let (visible, empty_text) = {
             let mut st = self.state.borrow_mut();
@@ -456,25 +490,7 @@ impl UiHandles {
                 .items
                 .iter()
                 .enumerate()
-                .filter(|(_, item)| {
-                    if filter == FilterTab::Pinned && !item.pinned {
-                        return false;
-                    }
-                    if filter == FilterTab::Images && !matches!(item.kind, UiItemKind::Image { .. })
-                    {
-                        return false;
-                    }
-                    if !query_lower.is_empty() {
-                        match &item.kind {
-                            UiItemKind::Text { search, .. } => search.contains(&query_lower),
-                            UiItemKind::Image { .. } => {
-                                query_lower == "ảnh" || query_lower == "anh" || query_lower == "image"
-                            }
-                        }
-                    } else {
-                        true
-                    }
-                })
+                .filter(|(_, item)| item_matches_filter(item, filter, &query_lower))
                 .map(|(idx, _)| idx)
                 .collect();
 
@@ -592,84 +608,25 @@ impl UiHandles {
             }
         }
 
-        // Cột nút xếp dọc trên-dưới (trên: ⋯ mở menu Delete, dưới: Ghim)
+        // Cột nút xếp dọc trên-dưới (trên: ⋯ mở menu Delete theo kiểu lazy, dưới: Ghim)
         let actions_col = gtk::Box::new(Orientation::Vertical, 4);
         actions_col.set_valign(Align::Fill);
 
         let menu_icon = Image::from_icon_name(Some("view-more-horizontal-symbolic"), IconSize::Menu);
         menu_icon.set_pixel_size(15);
-        let menu_btn = MenuButton::new();
+        let menu_btn = Button::new();
         menu_btn.style_context().add_class("card-menu-btn");
         menu_btn.set_image(Some(&menu_icon));
         menu_btn.set_always_show_image(true);
         menu_btn.set_relief(ReliefStyle::None);
         menu_btn.set_can_focus(false);
-        menu_btn.set_use_popover(true);
         menu_btn.set_tooltip_text(Some("Tùy chọn"));
-
-        let popover = Popover::new(Some(&menu_btn));
-        popover.style_context().add_class("card-popover");
-        popover.set_position(PositionType::Left);
-
-        {
-            let count = self.popover_open_count.clone();
-            popover.connect_show(move |_| {
-                count.set(count.get().saturating_add(1));
-            });
-        }
-        {
-            let count = self.popover_open_count.clone();
-            popover.connect_closed(move |_| {
-                count.set(count.get().saturating_sub(1));
-            });
-        }
-
-        let pop_box = gtk::Box::new(Orientation::Vertical, 2);
-
-        if is_image {
-            let zoom_btn = make_popover_action("zoom-in-symbolic", "Phóng to", false);
-            let ui = self.clone();
-            let pop = popover.clone();
-            zoom_btn.connect_clicked(move |_| {
-                pop.popdown();
-                ui.open_zoom(item_idx);
-            });
-            pop_box.pack_start(&zoom_btn, false, false, 0);
-        } else {
-            let plain_btn = make_popover_action("edit-paste-symbolic", "Dán chữ thuần", false);
-            let ui = self.clone();
-            let pop = popover.clone();
-            plain_btn.connect_clicked(move |_| {
-                pop.popdown();
-                let ui_idle = ui.clone();
-                glib::idle_add_local(move || {
-                    ui_idle.paste_item(item_idx, true);
-                    glib::ControlFlow::Break
-                });
-            });
-            pop_box.pack_start(&plain_btn, false, false, 0);
-        }
-
-        let delete_btn = make_popover_action("user-trash-symbolic", "Delete", true);
         {
             let ui = self.clone();
-            let pop = popover.clone();
-            delete_btn.connect_clicked(move |_| {
-                pop.popdown();
-                let ui_idle = ui.clone();
-                glib::idle_add_local(move || {
-                    match copyq::delete_item(copyq_row) {
-                        Ok(()) => ui_idle.reload_from_copyq(),
-                        Err(err) => eprintln!("copyq-ui: {err}"),
-                    }
-                    glib::ControlFlow::Break
-                });
+            menu_btn.connect_clicked(move |btn| {
+                ui.open_card_menu(btn, item_idx, copyq_row, is_image);
             });
         }
-        pop_box.pack_start(&delete_btn, false, false, 0);
-        pop_box.show_all();
-        popover.add(&pop_box);
-        menu_btn.set_popover(Some(&popover));
 
         // Nút Ghim (nằm dưới nút ⋯)
         let pin_icon = Image::from_icon_name(Some("view-pin-symbolic"), IconSize::Menu);
@@ -747,35 +704,147 @@ impl UiHandles {
         }
     }
 
+    fn close_active_popover(&self) {
+        let old = self.active_popover.borrow_mut().take();
+        if let Some(pop) = old {
+            pop.popdown();
+        }
+        self.popover_open_count.set(0);
+    }
+
+    fn open_card_menu(&self, anchor: &Button, item_idx: usize, copyq_row: usize, is_image: bool) {
+        self.close_active_popover();
+
+        let popover = Popover::new(Some(anchor));
+        popover.style_context().add_class("card-popover");
+        popover.set_position(PositionType::Left);
+
+        let pop_box = gtk::Box::new(Orientation::Vertical, 2);
+
+        if is_image {
+            let zoom_btn = make_popover_action("zoom-in-symbolic", "Phóng to", false);
+            let ui = self.clone();
+            let pop = popover.clone();
+            zoom_btn.connect_clicked(move |_| {
+                pop.popdown();
+                ui.open_zoom(item_idx);
+            });
+            pop_box.pack_start(&zoom_btn, false, false, 0);
+        } else {
+            let plain_btn = make_popover_action("edit-paste-symbolic", "Dán chữ thuần", false);
+            let ui = self.clone();
+            let pop = popover.clone();
+            plain_btn.connect_clicked(move |_| {
+                pop.popdown();
+                let ui_idle = ui.clone();
+                glib::idle_add_local(move || {
+                    ui_idle.paste_item(item_idx, true);
+                    glib::ControlFlow::Break
+                });
+            });
+            pop_box.pack_start(&plain_btn, false, false, 0);
+        }
+
+        let delete_btn = make_popover_action("user-trash-symbolic", "Delete", true);
+        {
+            let ui = self.clone();
+            let pop = popover.clone();
+            delete_btn.connect_clicked(move |_| {
+                pop.popdown();
+                let ui_idle = ui.clone();
+                glib::idle_add_local(move || {
+                    match copyq::delete_item(copyq_row) {
+                        Ok(()) => ui_idle.reload_from_copyq(),
+                        Err(err) => eprintln!("copyq-ui: {err}"),
+                    }
+                    glib::ControlFlow::Break
+                });
+            });
+        }
+        pop_box.pack_start(&delete_btn, false, false, 0);
+        pop_box.show_all();
+        popover.add(&pop_box);
+
+        {
+            let count = self.popover_open_count.clone();
+            let active_ref = self.active_popover.clone();
+            popover.connect_closed(move |p| {
+                count.set(count.get().saturating_sub(1));
+                let mut slot = active_ref.borrow_mut();
+                if slot.as_ref() == Some(p) {
+                    *slot = None;
+                }
+                let p_weak = p.downgrade();
+                glib::idle_add_local(move || {
+                    if let Some(pop) = p_weak.upgrade() {
+                        pop.set_relative_to(None::<&gtk::Widget>);
+                    }
+                    glib::ControlFlow::Break
+                });
+            });
+        }
+
+        self.popover_open_count
+            .set(self.popover_open_count.get().saturating_add(1));
+        *self.active_popover.borrow_mut() = Some(popover.clone());
+        popover.popup();
+    }
+
     fn open_zoom(&self, item_idx: usize) {
-        let (pixbuf, max_w, max_h) = {
-            let st = self.state.borrow();
-            let pb = match st.items.get(item_idx) {
-                Some(UiItem {
-                    kind: UiItemKind::Image { full: Some(pb), .. },
-                    ..
-                }) => Some(pb.clone()),
-                _ => None,
+        let (copyq_row, preview_thumb, max_w, max_h) = {
+            let mut st_ref = self.state.borrow_mut();
+            let st = &mut *st_ref;
+            let Some(item) = st.items.get(item_idx) else {
+                return;
             };
-            (
-                pb,
-                (st.config.width - 40).max(200),
-                (st.config.height - 120).max(200),
-            )
+            let UiItemKind::Image { thumb } = &item.kind else {
+                return;
+            };
+            let row = item.row;
+            let pb = thumb.clone();
+            let mw = (st.config.width - 40).max(200);
+            let mh = (st.config.height - 120).max(200);
+            st.zoomed_item_index = Some(item_idx);
+            (row, pb, mw, mh)
         };
 
-        if let Some(pb) = pixbuf {
-            if let Some(scaled) = scale_pixbuf(&pb, max_w, max_h, false) {
-                self.zoom_image.set_from_pixbuf(Some(&scaled));
-            } else {
-                self.zoom_image.set_from_pixbuf(Some(&pb));
-            }
-            self.state.borrow_mut().zoomed_item_index = Some(item_idx);
-            self.zoom_overlay.show();
+        let zoom_gen = self.zoom_generation.get().wrapping_add(1);
+        self.zoom_generation.set(zoom_gen);
+
+        // Hiện ngay ảnh xem trước có sẵn để không bị chớp trống, sau đó nạp bản nét gốc từ CopyQ ở luồng nền
+        if let Some(pb) = preview_thumb {
+            self.zoom_image.set_from_pixbuf(Some(&pb));
+        } else {
+            self.zoom_image.clear();
         }
+        self.zoom_overlay.show();
+
+        let (tx, rx) = mpsc::channel::<Result<Vec<u8>, String>>();
+        std::thread::spawn(move || {
+            let _ = tx.send(copyq::fetch_item_image(copyq_row));
+        });
+
+        let ui = self.clone();
+        glib::timeout_add_local(Duration::from_millis(10), move || {
+            if ui.zoom_generation.get() != zoom_gen || !ui.window.is_visible() {
+                return glib::ControlFlow::Break;
+            }
+            match rx.try_recv() {
+                Ok(Ok(bytes)) => {
+                    if let Some(zoom_pb) = decode_scaled_pixbuf(&bytes, max_w, max_h, false) {
+                        ui.zoom_image.set_from_pixbuf(Some(&zoom_pb));
+                    }
+                    glib::ControlFlow::Break
+                }
+                Ok(Err(_)) | Err(TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                Err(TryRecvError::Empty) => glib::ControlFlow::Continue,
+            }
+        });
     }
 
     fn close_zoom(&self) {
+        self.zoom_generation
+            .set(self.zoom_generation.get().wrapping_add(1));
         self.state.borrow_mut().zoomed_item_index = None;
         self.zoom_overlay.hide();
         self.zoom_image.clear();
@@ -798,16 +867,32 @@ impl UiHandles {
     }
 }
 
+fn item_matches_filter(item: &UiItem, filter: FilterTab, query_lower: &str) -> bool {
+    if filter == FilterTab::Pinned && !item.pinned {
+        return false;
+    }
+    if filter == FilterTab::Images && !matches!(item.kind, UiItemKind::Image { .. }) {
+        return false;
+    }
+    if !query_lower.is_empty() {
+        match &item.kind {
+            UiItemKind::Text { search, .. } => search.contains(query_lower),
+            UiItemKind::Image { .. } => {
+                query_lower == "ảnh" || query_lower == "anh" || query_lower == "image"
+            }
+        }
+    } else {
+        true
+    }
+}
+
 fn convert_item(item: ClipboardItem, thumb_w: i32, image_fit: ImageFit) -> UiItem {
     let kind = match item.content {
         ItemContent::Text { display, search } => UiItemKind::Text { display, search },
         ItemContent::Image { bytes } => {
-            let full = decode_pixbuf(&bytes);
             let cover = image_fit == ImageFit::Cover;
-            let thumb = full
-                .as_ref()
-                .and_then(|pb| scale_pixbuf(pb, thumb_w, THUMB_HEIGHT, cover));
-            UiItemKind::Image { thumb, full }
+            let thumb = decode_scaled_pixbuf(&bytes, thumb_w, THUMB_HEIGHT, cover);
+            UiItemKind::Image { thumb }
         }
     };
     UiItem {
@@ -817,35 +902,48 @@ fn convert_item(item: ClipboardItem, thumb_w: i32, image_fit: ImageFit) -> UiIte
     }
 }
 
-fn decode_pixbuf(bytes: &[u8]) -> Option<Pixbuf> {
-    let loader = PixbufLoader::new();
-    loader.write(bytes).ok()?;
-    loader.close().ok()?;
-    loader.pixbuf()
-}
-
-fn scale_pixbuf(pb: &Pixbuf, max_w: i32, max_h: i32, cover: bool) -> Option<Pixbuf> {
-    let tw = pb.width().max(1);
-    let th = pb.height().max(1);
+/// Giải nén và thu nhỏ ảnh trực tiếp qua `size-prepared` của `PixbufLoader`.
+/// Độ nét trên thẻ giữ nguyên 100%, nhưng không giữ bản ảnh gốc (~8 MB/ảnh) trong RAM.
+fn decode_scaled_pixbuf(bytes: &[u8], max_w: i32, max_h: i32, cover: bool) -> Option<Pixbuf> {
     let max_w = max_w.max(1);
     let max_h = max_h.max(1);
 
+    let loader = PixbufLoader::new();
+    loader.connect_size_prepared(move |ldr, orig_w, orig_h| {
+        let tw = orig_w.max(1);
+        let th = orig_h.max(1);
+        if cover {
+            let scale = (f64::from(max_w) / f64::from(tw)).max(f64::from(max_h) / f64::from(th));
+            let w = ((f64::from(tw) * scale).round() as i32).max(max_w);
+            let h = ((f64::from(th) * scale).round() as i32).max(max_h);
+            ldr.set_size(w, h);
+        } else {
+            let scale = (f64::from(max_w) / f64::from(tw))
+                .min(f64::from(max_h) / f64::from(th))
+                .min(1.0);
+            let w = ((f64::from(tw) * scale).round() as i32).clamp(1, max_w);
+            let h = ((f64::from(th) * scale).round() as i32).clamp(1, max_h);
+            ldr.set_size(w, h);
+        }
+    });
+
+    loader.write(bytes).ok()?;
+    loader.close().ok()?;
+    let pb = loader.pixbuf()?;
+
     if cover {
-        let scale = (f64::from(max_w) / f64::from(tw)).max(f64::from(max_h) / f64::from(th));
-        let w = ((f64::from(tw) * scale).round() as i32).max(max_w);
-        let h = ((f64::from(th) * scale).round() as i32).max(max_h);
-        let scaled = pb.scale_simple(w, h, InterpType::Bilinear)?;
+        let w = pb.width();
+        let h = pb.height();
         let x = ((w - max_w) / 2).max(0);
         let y = ((h - max_h) / 2).max(0);
         let cw = max_w.min(w - x).max(1);
         let ch = max_h.min(h - y).max(1);
-        Some(scaled.new_subpixbuf(x, y, cw, ch))
-    } else {
-        let scale = (f64::from(max_w) / f64::from(tw)).min(f64::from(max_h) / f64::from(th));
-        let w = ((f64::from(tw) * scale).round() as i32).clamp(1, max_w);
-        let h = ((f64::from(th) * scale).round() as i32).clamp(1, max_h);
-        pb.scale_simple(w, h, InterpType::Bilinear)
+        if cw < w || ch < h {
+            return Some(pb.new_subpixbuf(x, y, cw, ch));
+        }
     }
+
+    Some(pb)
 }
 
 fn create_copyq_logo() -> Image {
@@ -1006,7 +1104,8 @@ fn setup_keyboard_handler(window: &ApplicationWindow, ui: UiHandles) {
 
         if key == gdk::keys::constants::Escape {
             if ui.popover_open_count.get() > 0 {
-                return glib::Propagation::Proceed;
+                ui.close_active_popover();
+                return glib::Propagation::Stop;
             }
             if !ui.search_entry.text().is_empty() {
                 ui.search_entry.set_text("");

@@ -137,6 +137,69 @@ for (var i = startRow; i < endRow; i++) {{
     Ok(parse_protocol_output(&stdout))
 }
 
+/// Đọc dữ liệu ảnh gốc của duy nhất 1 dòng `row` theo yêu cầu (chỉ gọi khi bấm Phóng to).
+/// Giúp không phải giữ sẵn hàng chục ảnh gốc (8 MB/ảnh) trên RAM lúc mới mở popup.
+pub fn fetch_item_image(row: usize) -> Result<Vec<u8>, String> {
+    let script = format!(
+        r#"
+var r = {row};
+var imgMimes = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp'];
+var maxImgBytes = 12582912;
+var nl = String.fromCharCode(10);
+var cr = String.fromCharCode(13);
+
+function byteLen(b) {{
+    if (!b) {{ return 0; }}
+    if (typeof b.size === 'function') {{ return b.size(); }}
+    if (typeof b.length === 'number') {{ return b.length; }}
+    return 0;
+}}
+
+var rawFmts = str(read('?', r));
+var fmts = rawFmts ? rawFmts.split(nl) : [];
+var cleanFmts = [];
+for (var j = 0; j < fmts.length; j++) {{
+    var s = fmts[j].split(cr).join('').trim();
+    if (s.length > 0) {{ cleanFmts.push(s); }}
+}}
+
+for (var k = 0; k < imgMimes.length; k++) {{
+    if (cleanFmts.indexOf(imgMimes[k]) !== -1) {{
+        var rawImg = read(imgMimes[k], r);
+        var n = byteLen(rawImg);
+        if (n > 0 && n <= maxImgBytes) {{
+            var b64 = str(toBase64(rawImg)).split(nl).join('').split(cr).join('');
+            print('IMG ' + b64 + nl);
+        }}
+        break;
+    }}
+}}
+"#
+    );
+
+    let output = Command::new(copyq_bin())
+        .arg("eval")
+        .arg(&script)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|err| format!("Không đọc được ảnh mục #{row}: {err}"))?;
+
+    if !output.status.success() {
+        return Err(format!("CopyQ không trả về ảnh mục #{row}."));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(b64) = line.strip_prefix("IMG ") {
+            let decoded = decode_base64(b64)?;
+            if !decoded.is_empty() {
+                return Ok(decoded);
+            }
+        }
+    }
+    Err("Không tìm thấy dữ liệu ảnh gốc.".to_string())
+}
+
 fn parse_protocol_output(stdout: &str) -> (usize, Vec<ClipboardItem>) {
     let mut total = 0usize;
     let mut items = Vec::new();
