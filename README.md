@@ -1,74 +1,67 @@
 # CopyQ-UI
 
-Giao diện popup hiện đại, gọn gàng kiểu `Win + V` (Windows 11) dành cho **CopyQ** trên **Linux Mint Cinnamon (X11)**, viết bằng **Rust + GTK3** (cùng nền tảng GTK3 bản địa của Cinnamon).
+Giao diện popup kiểu **`Win + V` (Windows 11)** dành cho **CopyQ** trên **Linux Mint Cinnamon (X11)**, viết bằng **Rust + GTK3**.
 
-## Cam kết bảo mật & quyền riêng tư (Security by Design)
-Bạn có thể tự kiểm tra toàn bộ mã nguồn (chỉ gồm 5 file `.rs` nhỏ gọn):
-- **`#![forbid(unsafe_code)]`**: Tuyệt đối không dùng code `unsafe` trong toàn bộ dự án.
-- **Chỉ đúng 1 thư viện duy nhất (`gtk` 0.18)**: Dùng thẳng GTK3 bản địa có sẵn trên Linux Mint Cinnamon để vẽ giao diện và đặt vị trí cửa sổ. Không có thư viện mạng (`reqwest`, `hyper`, `tokio`...).
-- **100% Offline**: Không mở kết nối mạng, không nghe cổng (port), không gửi dữ liệu hay telemetry ra ngoài.
-- **Không chạy lệnh qua Shell (`sh -c`)**: Gọi trực tiếp `/usr/bin/copyq` với tham số cố định và chỉ số dòng dạng số nguyên (`usize`), triệt tiêu hoàn toàn nguy cơ command injection.
-- **Không ghi dữ liệu clipboard ra ổ cứng**: Toàn bộ văn bản và hình ảnh đọc từ CopyQ chỉ nằm trên RAM khi popup mở, và được giải phóng ngay khi popup đóng (**0 MB RAM lúc không dùng**).
-- **Quyền file riêng tư (`0600` / `0700`)**: Chỉ lưu duy nhất 2 file tùy chọn giao diện của bạn trong `~/.config/copyq-ui/`.
-- **Build minh bạch trên Cloud**: GitHub Actions chỉ dùng action chính chủ (`actions/checkout@v4`, `actions/upload-artifact@v4`) và gói Ubuntu gốc (`libgtk-3-dev`).
+## Điểm nổi bật
+- **Gọn, mượt, mở ngay chỗ chuột:** Tự lật tránh mép màn hình & taskbar, ẩn khỏi thanh taskbar, kéo di chuyển tự do.
+- **Siêu nhẹ — không cần chạy ngầm:** Dùng chung GTK3 có sẵn của Cinnamon (~15 MB RAM thực khi mở, **0 MB khi đóng**). Việc lưu lịch sử vẫn do CopyQ gốc đảm nhiệm.
+- **Đầy đủ thao tác nhanh:** Tìm kiếm tức thì, lọc *Tất cả / Đã ghim / Ảnh*, đổi chế độ **Sáng / Tối**, ghim mục lên đầu, phóng to xem ảnh (`Space`), dán chữ thuần không dính định dạng web (`Shift + Enter`).
+- **An toàn & 100% Offline:** `#![forbid(unsafe_code)]`, chỉ dùng đúng 1 thư viện `gtk`, không kết nối mạng, không gọi shell, không ghi dữ liệu clipboard ra ổ cứng.
 
 ---
 
-## Tính năng chính
-- **Mở thẳng tại chỗ chuột — không nháy góc trên trái:** Đặt tọa độ bản địa qua `window.move_(x, y)` trước khi hiện cửa sổ, tự lật lên trên / sang trái khi bấm `Win + V` ở khung chat sát đáy màn hình (Facebook Messenger, Zalo Web...) và tự tránh thanh taskbar.
-- **Nhẹ, mở tức thì & ẩn khỏi thanh taskbar:** Không khởi tạo GPU context nặng, không tạo thêm icon thừa dưới thanh taskbar, tự nổi trên các cửa sổ khác.
-- **Bố cục sạch sẽ:** Logo CopyQ gốc góc trái, thanh tìm kiếm vừa khít ở giữa, nút **Sáng / Tối** (mặt trời / mặt trăng) góc phải tự lưu trạng thái.
-- **Kéo di chuyển tự do:** Có thể nắm kéo di chuyển cửa sổ từ thanh tiêu đề, vùng trống thanh lọc hoặc thanh chân trang.
-- **Cố định khung cửa sổ:** Chuyển tab *Tất cả / Đã ghim / Ảnh* hoặc lọc ít mục không bị giật/thu nhỏ cửa sổ.
-- **Làm sạch văn bản copy từ web:** Chỉ đọc `text/plain`, lọc sạch mảng màu nền HTML, dòng trống thừa và ký tự lỗi ``; hỗ trợ dán nhanh chữ thuần bằng **`Shift + Enter`** hoặc trong menu `⋯`.
-- **Hiển thị ảnh rõ nét:** Khung ảnh nền trơn (không kẻ caro), giữ nguyên tỉ lệ ảnh; bấm **`⋯ → Phóng to`** hoặc phím **`Space`** để xem ảnh lớn trước khi dán.
-- **Nút hành động xếp dọc (trên–dưới):** Trên là nút **`⋯`** (bấm mới hiện *Delete*), dưới là nút **Ghim**.
-- **Tự tùy biến CSS không cần build lại:** Chỉnh trực tiếp file `~/.config/copyq-ui/custom.css`.
+## Yêu cầu
+- **CopyQ** đã cài đặt và đang chạy nền (bật *Autostart* trong CopyQ).
+- Linux dùng X11 có sẵn GTK3 *(đã kiểm thử ổn định trên Linux Mint 22.x Cinnamon)*.
 
 ---
 
-## Cách build trên Cloud (GitHub Actions — không cần cài Rust trên máy)
+## Cách cài đặt & gắn phím `Win + V`
 
-1. Tạo một repository mới trên GitHub (ví dụ `CopyQ-UI`) và đẩy thư mục này lên (hoặc upload file lên repo trên web GitHub).
-2. Vào tab **Actions** trên GitHub → chọn workflow **Build CopyQ-UI (Ubuntu 24.04 / Linux Mint 22.x)** → chờ khoảng 1–2 phút build xong.
-3. Tải file artifact **`copyq-ui-linux-x86_64`** về máy và giải nén lấy file `copyq-ui`.
+### 1. Lấy file chạy `copyq-ui`
+- **Cách nhanh:** Tải bản build sẵn ở mục **Releases** hoặc tab **Actions** → artifact `copyq-ui-linux-x86_64`.
+- **Hoặc tự build từ mã nguồn** *(Ubuntu 24.04 / Linux Mint 22.x)*:
+  ```bash
+  sudo apt install -y libgtk-3-dev pkg-config
+  cargo build --release
+  # File chạy nằm tại: target/release/copyq-ui
+  ```
 
-*(Hoặc nếu bạn build trên VPS Ubuntu 24.04: `sudo apt install libgtk-3-dev pkg-config` rồi chạy `cargo build --release`, lấy file tại `target/release/copyq-ui`).*
+### 2. Chép vào `~/.local/bin` và cấp quyền
+```bash
+mkdir -p ~/.local/bin
+cp copyq-ui ~/.local/bin/copyq-ui
+chmod +x ~/.local/bin/copyq-ui
+```
 
----
-
-## Cách cài đặt & gắn vào phím `Win + V` trên Linux Mint Cinnamon
-
-1. Chép file `copyq-ui` đã tải về vào `~/.local/bin/` và cấp quyền chạy:
-   ```bash
-   mkdir -p ~/.local/bin
-   cp copyq-ui ~/.local/bin/copyq-ui
-   chmod +x ~/.local/bin/copyq-ui
-   ```
-2. Đảm bảo **CopyQ** vẫn đang chạy ngầm ở khay hệ thống như bình thường.
-3. Mở **System Settings → Keyboard → Shortcuts → Custom Shortcuts**:
-   - Đổi lệnh của phím **`Super + V` (`Win + V`)** từ `copyq toggle` thành:
-     ```
-     /home/<tên-user-của-bạn>/.local/bin/copyq-ui
-     ```
-   *(Ví dụ: `/home/user/.local/bin/copyq-ui`)*
+### 3. Gắn phím tắt `Win + V` (Linux Mint Cinnamon)
+Mở **System Settings → Keyboard → Shortcuts → Custom Shortcuts → Add custom shortcut**:
+- **Name:** `CopyQ UI`
+- **Command:** `/home/<tên-user>/.local/bin/copyq-ui` *(điền đầy đủ đường dẫn, không viết tắt `~`)*
+- **Keyboard bindings:** gán tổ hợp **`Win + V`** (`Super+V`).
 
 ---
 
-## Phím tắt trong cửa sổ popup
+## Phím tắt trong popup
 | Phím | Chức năng |
 | :--- | :--- |
-| `↑` / `↓` | Di chuyển chọn thẻ |
+| `↑` / `↓` | Chọn mục |
 | `Enter` hoặc Click | Dán mục đang chọn & tự đóng |
-| `Shift + Enter` | Dán dạng **chữ thuần** (bỏ sạch format web) |
-| `Space` (hoặc `Ctrl + Space`) | Phóng to / thu nhỏ ảnh đang chọn |
+| `Shift + Enter` | Dán dạng **chữ thuần** (bỏ định dạng web) |
+| `Space` | Phóng to / đóng xem trước ảnh đang chọn |
 | `Ctrl + F` | Tập trung vào ô tìm kiếm |
-| `Esc` | Đóng xem ảnh → xóa từ khóa tìm → đóng popup |
-| `Win + V` (lần 2) | Đóng popup ngay (toggle) |
+| `Esc` / `Win + V` | Đóng xem ảnh / xóa từ khóa / đóng popup |
 
 ---
 
-## Tùy chỉnh giao diện (`~/.config/copyq-ui/`)
-Lần đầu chạy, app sẽ tự tạo 2 file trong `~/.config/copyq-ui/`:
-- **`config.conf`**: chỉnh `theme`, `max_items`, `width`, `height`, `auto_paste`, `plain_text_paste`, `image_fit` (`contain` hoặc `cover`), `position` (`cursor`, `bottom-right`, `center`, hoặc `default`), `close_on_unfocus`.
-- **`custom.css`**: ghi đè màu sắc, độ bo góc, cỡ chữ tùy ý — lưu xong bấm `Win + V` là ăn ngay, không cần build lại.
+## Tùy chỉnh (tùy chọn)
+Lần chạy đầu tiên, app tự tạo 2 file trong `~/.config/copyq-ui/`:
+- `config.conf`: đổi theme (`dark`/`light`), kích thước cửa sổ, số mục tối đa, vị trí mở (`cursor`, `bottom-right`, `center`), cách hiển thị ảnh (`contain`/`cover`)...
+- `custom.css`: tùy chỉnh màu sắc, bo góc, cỡ chữ — lưu xong bấm `Win + V` là áp dụng ngay, không cần build lại.
+
+## Gỡ cài đặt
+Không ảnh hưởng đến dữ liệu CopyQ gốc:
+```bash
+rm -f ~/.local/bin/copyq-ui && rm -rf ~/.config/copyq-ui
+```
+Sau đó xóa (hoặc đổi lại) phím tắt `Super + V` trong **Keyboard → Shortcuts**.
